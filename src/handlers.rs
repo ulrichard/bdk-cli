@@ -26,6 +26,8 @@ use bdk::{database::BatchDatabase, wallet::AddressIndex, Error, FeeRate, Keychai
 
 use clap::Parser;
 
+#[cfg(all(feature = "reserves", feature = "electrum"))]
+use crate::bitcoin::{OutPoint, TxOut};
 use bdk::bitcoin::consensus::encode::{deserialize, serialize, serialize_hex};
 #[cfg(any(
     feature = "electrum",
@@ -76,9 +78,7 @@ use bdk_macros::maybe_async;
 ))]
 use bdk_macros::maybe_await;
 #[cfg(feature = "reserves")]
-use bdk_reserves::reserves::verify_proof;
-#[cfg(feature = "reserves")]
-use bdk_reserves::reserves::ProofOfReserves;
+use bdk_reserves::reserves::{ProofOfReserves, ReserveProof};
 #[cfg(feature = "repl")]
 use regex::Regex;
 #[cfg(feature = "repl")]
@@ -550,7 +550,6 @@ pub(crate) fn handle_compile_subcommand(
 /// Proof of reserves options are described in [`CliSubCommand::ExternalReserves`].
 #[cfg(all(feature = "reserves", feature = "electrum"))]
 pub(crate) fn handle_ext_reserves_subcommand(
-    network: Network,
     message: String,
     psbt: String,
     confirmations: usize,
@@ -573,14 +572,14 @@ pub(crate) fn handle_ext_reserves_subcommand(
             get_outpoints_for_address(address, &client, max_confirmation_height)
         })
         .collect::<Result<Vec<Vec<_>>, Error>>()?;
-    let outpoints_combined = outpoints_per_addr
-        .iter()
-        .fold(Vec::new(), |mut outpoints, outs| {
-            outpoints.append(&mut outs.clone());
-            outpoints
-        });
+    let outpoints = outpoints_per_addr
+        .into_iter()
+        .flatten()
+        .map(|(outpoint, outp)| (outpoint, outp))
+        .collect::<BTreeMap<OutPoint, TxOut>>();
 
-    let spendable = verify_proof(&psbt, &message, outpoints_combined, network)
+    let spendable = psbt
+        .verify_reserve_proof(&message, &outpoints)
         .map_err(|e| Error::Generic(format!("{:?}", e)))?;
 
     Ok(json!({ "spendable": spendable }))
@@ -761,7 +760,6 @@ pub(crate) fn handle_command(cli_opts: CliOpts) -> Result<String, Error> {
             electrum_opts,
         } => {
             let result = handle_ext_reserves_subcommand(
-                cli_opts.network,
                 message,
                 psbt,
                 confirmations,
